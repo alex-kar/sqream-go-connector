@@ -4,7 +4,7 @@ package proto;
 
 import "error.proto";
 
-option java_multiple_files = true;
+option go_package = "./proto";
 
 service QueryHandlerService {
   rpc Compile(CompileRequest) returns (CompileResponse);

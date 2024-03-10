@@ -2,7 +2,7 @@ syntax = "proto3";
 
 package proto;
 
-option java_multiple_files = true;
+option go_package = "./proto";
 
 enum AuthenticationType {
   AUTHENTICATION_TYPE_UNSPECIFIED = 0;
