@@ -1,6 +1,6 @@
 syntax = "proto3";
 
-package proto;
+package com.sqream.cloud.generated.v1;
 
 import "error.proto";
 

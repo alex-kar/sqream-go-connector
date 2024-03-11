@@ -12,5 +12,10 @@ Compile
 ```
 cd src/proto
 mkdir stubs
-protoc --go_out=stubs *.proto
+protoc --go_out=stubs *.proto --go-grpc_out=stubs
+```
+
+To install plugin
+```
+go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
 ```
