@@ -2,20 +2,20 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
 	pb "github.com/alex-kar/sqream-go-connector/src/proto/stubs/proto"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/metadata"
 	"log"
 )
 
 const (
-	authAddr string = "localhost:9091"
-	qhAddr   string = "localhost:9092"
+	addr string = "4-52.isqream.com:443"
 )
 
 type ResultChunkHeader struct {
@@ -24,8 +24,14 @@ type ResultChunkHeader struct {
 }
 
 func main() {
+	// Create insecure TLS credentials
+	creds := credentials.NewTLS(&tls.Config{
+		InsecureSkipVerify: true,
+	})
 	// Establish connection
-	conn, err := grpc.Dial(authAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	maxMsgSize := 1024 * 1024 * 256 // 256 MBytes
+	conn, err := grpc.Dial(addr, grpc.WithTransportCredentials(creds), grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(maxMsgSize)))
+
 	if err != nil {
 		log.Fatalf("Failed to establish connection: %v", err)
 	}
@@ -48,6 +54,7 @@ func main() {
 		log.Fatalf("Authentication response has error: %v", response.GetError())
 	}
 	token := response.GetToken()
+	fmt.Println("Got JWT")
 
 	// Add Bearer token to the header
 	md := metadata.Pairs("authorization", "Bearer "+token)
@@ -69,15 +76,6 @@ func main() {
 	}
 	contextId := session.GetContextId()
 
-	// Establish second connection to QueryHanler TODO: Remove it once configured secured connection properly through Ambassador
-	conn.Close()
-	maxMsgSize := 1024 * 1024 * 256 // 256 MBytes
-	conn, err = grpc.Dial(qhAddr, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(maxMsgSize)))
-	if err != nil {
-		log.Fatalf("Failed to establish connection: %v", err)
-	}
-	log.Printf("Connected to the server")
-
 	qhClient := pb.NewQueryHandlerServiceClient(conn)
 
 	sql := "select * from t;"
@@ -89,6 +87,7 @@ func main() {
 		Encoding:     "UTF-8",
 		QueryTimeout: 0,
 	}
+	log.Println("About to send authentication request")
 	compilationResult, err := qhClient.Compile(context, &compilationRequest)
 	if err != nil {
 		log.Fatalf("Compilation failed: %v", err)
