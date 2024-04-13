@@ -2,206 +2,144 @@ package main
 
 import (
 	"context"
-	"crypto/tls"
-	"encoding/binary"
-	"encoding/json"
-	"errors"
+	"database/sql"
+	"database/sql/driver"
 	"fmt"
-	pb "github.com/alex-kar/sqream-go-connector/src/proto/stubs/proto"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials"
-	"google.golang.org/grpc/metadata"
+	"io"
 	"log"
+	"strings"
 )
 
-const (
-	addr string = "4-52.isqream.com:443"
-)
+type Driver struct{}
 
-type ResultChunkHeader struct {
-	ColSzs []string
-	Rows   int32
+func (driver Driver) Open(name string) (driver.Conn, error) {
+	fmt.Printf("Driver.Open() with args [{%s}]\n", name)
+	args := strings.Split(name, " ")
+	addr := fmt.Sprintf("%s:%s", args[0], args[1])
+	log.Printf("Trying to connect driver to [%s]", addr)
+	client := GRPCClient{}
+	client.Init(parseConnParams())
+	err := client.OpenSession()
+	if err != nil {
+		return nil, err
+	}
+	return Conn{
+		client: &client,
+	}, nil
+}
+
+type ConnParam struct {
+}
+
+type Conn struct {
+	client Client
+}
+
+func (conn Conn) Prepare(query string) (driver.Stmt, error) {
+	log.Printf("Prepare statement [%s]", query)
+	return Stmt{sql: query}, nil
+}
+
+func (conn Conn) Close() error {
+	log.Print("Close conn")
+	return nil
+}
+
+func (conn Conn) Begin() (driver.Tx, error) {
+	return nil, nil
+}
+
+type Stmt struct {
+	sql    string
+	Client *grpc.ClientConn
+}
+
+func (stmt Stmt) Close() error {
+	log.Print("Close stmt")
+	return nil
+}
+
+func (stmt Stmt) NumInput() int {
+	log.Print("NumInput")
+	return 0
+}
+
+func (stmt Stmt) Exec(args []driver.Value) (driver.Result, error) {
+	log.Print("Exec stmt")
+	return nil, nil
+}
+
+func (stmt Stmt) Query(args []driver.Value) (driver.Rows, error) {
+	log.Print("Query stmt")
+	rows := Rows{Client: stmt.Client}
+	return rows, nil
+}
+
+type Rows struct {
+	Client *grpc.ClientConn
+}
+
+func (rows Rows) Columns() []string {
+	log.Printf("Return result metadata")
+	return []string{}
+}
+
+func (rows Rows) Close() error {
+	return nil
+}
+
+func (rows Rows) Next(dest []driver.Value) error {
+	return io.EOF
+}
+
+func init() {
+	fmt.Println("Register driver")
+	sql.Register("sqream", &Driver{})
 }
 
 func main() {
-	// Create insecure TLS credentials
-	creds := credentials.NewTLS(&tls.Config{
-		InsecureSkipVerify: true,
-	})
-	// Establish connection
-	maxMsgSize := 1024 * 1024 * 256 // 256 MBytes
-	conn, err := grpc.Dial(addr, grpc.WithTransportCredentials(creds), grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(maxMsgSize)))
+	host := "4-52.isqream.com"
+	port := "443"
+	token := "Z2hZaDdyMmhEWHFkdGJBN3c4em9SSndjcVBXQjI5a05XZjRHSHU4X1B0R1RmbzYzYm53NENGaUVIMGlSX0lLRjVhMUQ3c3JfbHQyVGtfRk1md3U5T1M3aXNlZlcwS2l4"
 
+	sqInfo := fmt.Sprintf("host=%s port=%s token=%s", host, port, token)
+	db, err := sql.Open("sqream", sqInfo)
 	if err != nil {
 		log.Fatalf("Failed to establish connection: %v", err)
 	}
 	log.Printf("Connected to the server")
+	defer db.Close()
+
+	fmt.Println("About to ping server")
+	err = db.Ping()
+	if err != nil {
+		log.Fatalf("Failed to ping server %v", err)
+	}
+
+	fmt.Println("About to connect to the server")
+	conn, err := db.Conn(context.Background())
+	if err != err {
+		log.Fatalf("Failed to connect to the server: %v", err)
+	}
 	defer conn.Close()
 
-	// Get Token
-	authClient := pb.NewAuthenticationServiceClient(conn)
-	request := pb.AuthRequest{
-		AuthType:    pb.AuthenticationType_AUTHENTICATION_TYPE_IDP,
-		User:        "user",
-		Password:    "pass",
-		AccessToken: "Z2hZaDdyMmhEWHFkdGJBN3c4em9SSndjcVBXQjI5a05XZjRHSHU4X1B0R1RmbzYzYm53NENGaUVIMGlSX0lLRjVhMUQ3c3JfbHQyVGtfRk1md3U5T1M3aXNlZlcwS2l4",
-	}
-	response, err := authClient.Auth(context.Background(), &request)
+	rows, err := db.Query("select 1;")
 	if err != nil {
-		log.Fatalf("Authentication failed: %v", err)
-	}
-	if response.GetError() != nil {
-		log.Fatalf("Authentication response has error: %v", response.GetError())
-	}
-	token := response.GetToken()
-	fmt.Println("Got JWT")
-
-	// Add Bearer token to the header
-	md := metadata.Pairs("authorization", "Bearer "+token)
-	context := metadata.NewOutgoingContext(context.Background(), md)
-	fmt.Println("Exchanged AccessToken with JWT")
-
-	// Open Session
-	openSessionRequest := pb.SessionRequest{
-		TenantId: "tenant",
-		Database: "master",
-		SourceIp: "127.0.0.1",
-	}
-	session, err := authClient.Session(context, &openSessionRequest)
-	if err != nil {
-		log.Fatalf("Failed to open session: %v", err)
-	}
-	if session.GetError() != nil {
-		log.Fatalf("Session response has error: %v", session.GetError())
-	}
-	contextId := session.GetContextId()
-
-	qhClient := pb.NewQueryHandlerServiceClient(conn)
-
-	sql := "select * from t;"
-
-	// Compile
-	compilationRequest := pb.CompileRequest{
-		ContextId:    contextId,
-		Sql:          []byte(sql),
-		Encoding:     "UTF-8",
-		QueryTimeout: 0,
-	}
-	log.Println("About to send authentication request")
-	compilationResult, err := qhClient.Compile(context, &compilationRequest)
-	if err != nil {
-		log.Fatalf("Compilation failed: %v", err)
-	}
-	if compilationResult.GetError() != nil {
-		log.Fatalf("Compilation result has error: %v", compilationResult.GetError())
-	}
-	columnMetadata := compilationResult.GetColumns()
-	for col, index := range columnMetadata {
-		log.Printf("Column %v: %v", index, col)
-	}
-	contextId = compilationResult.GetContextId()
-	queryType := compilationResult.GetQueryType()
-	fmt.Println("Query type", queryType)
-
-	// Execute
-	executeRequest := pb.ExecuteRequest{
-		ContextId: contextId,
-	}
-	execResponse, err := qhClient.Execute(context, &executeRequest)
-	if err != nil {
-		log.Fatalf("Failed to launch query: %v", err)
-	}
-	if execResponse.GetError() != nil {
-		log.Fatalf("Execution response has error: %v", execResponse.GetError())
+		log.Fatalf("Failed to execute statement: %v", err)
+		return
 	}
 
-	// Get status
-	statusRequest := pb.StatusRequest{
-		ContextId: contextId,
+	for rows.NextResultSet() {
+		//NOP
 	}
-	for {
-		statusResponse, err := qhClient.Status(context, &statusRequest)
-		if err != nil || statusResponse.GetError() != nil {
-			fmt.Println("Query exeuction failed. Status=", statusResponse.GetError())
-			break
-		}
-		if statusResponse.GetStatus() != 1 && statusResponse.GetStatus() != 6 { // 'running' or 'queued'
-			fmt.Println("Query exeuction completed. Status=", statusResponse.GetStatus())
-			break
-		}
-	}
-
-	// Fetch result if "QueryType_QUERY_TYPE_QUERY" type
-	fmt.Println("About to fetch result")
-	fetchRequest := pb.FetchRequest{
-		ContextId: contextId,
-	}
-	if queryType == 1 {
-		for {
-			fetchResponse, err := qhClient.Fetch(context, &fetchRequest)
-			if err != nil {
-				log.Fatalf("Failed to fetch results: %v", err)
-			}
-			if fetchResponse.GetError() != nil {
-				log.Fatalf("Fetch result has error: %v", execResponse.GetError())
-			}
-			if fetchResponse.GetRetryFetch() == true {
-				fmt.Println("Fetch retry")
-				continue
-			}
-			header, err := parseHeader(fetchResponse.GetQueryResult())
-			if err != nil {
-				fmt.Println("Failed to parse chunk header", err)
-				break
-			}
-			if header.Rows == 0 {
-				fmt.Println("Loaded all chunks")
-				break
-			}
-			fmt.Printf("Loaded chunk with [{%d}]\n", header.Rows)
-		}
-	}
-
-	// Close statement
-	closeRequest := pb.CloseRequest{
-		ContextId: contextId,
-	}
-	closeStmtReq := pb.CloseStatementRequest{
-		CloseRequest: &closeRequest,
-	}
-	closeStmtResponse, err := qhClient.CloseStatement(context, &closeStmtReq)
-	if err != nil {
-		log.Fatalf("Close statement failed: %v", err)
-	}
-	if closeStmtResponse.CloseResponse.GetError() != nil {
-		log.Fatalf("Close Statement has error: %v", compilationResult.GetError())
-	}
-	fmt.Println("Closed statement")
-
-	// Close session
-	closeSessionReq := pb.CloseSessionRequest{
-		CloseRequest: &closeRequest,
-	}
-	closeSessionResponse, err := qhClient.CloseSession(context, &closeSessionReq)
-	_ = closeSessionResponse
-	if err != nil {
-		log.Fatalf("Close session failed: %v", err)
-	}
-	if closeStmtResponse.CloseResponse.GetError() != nil {
-		log.Fatalf("Close session has error: %v", compilationResult.GetError())
-	}
-	fmt.Println("Closed session")
 }
 
-func parseHeader(bytes []byte) (ResultChunkHeader, error) {
-	if bytes == nil {
-		return ResultChunkHeader{}, errors.New("Byte array is nil")
+func parseConnParams() *ConnParams {
+	// return hardcoded values for now
+	return &ConnParams{
+		Host:  "4-52.isqream.com",
+		Port:  443,
+		Token: "Z2hZaDdyMmhEWHFkdGJBN3c4em9SSndjcVBXQjI5a05XZjRHSHU4X1B0R1RmbzYzYm53NENGaUVIMGlSX0lLRjVhMUQ3c3JfbHQyVGtfRk1md3U5T1M3aXNlZlcwS2l4",
 	}
-	if len(bytes) < 8 {
-		return ResultChunkHeader{}, errors.New("Byte arrays has less then 8 bytes")
-	}
-	headerLength := binary.LittleEndian.Uint64(bytes[:8])
-	var result ResultChunkHeader
-	json.Unmarshal(bytes[8:8+headerLength], &result)
-	return result, nil
 }
